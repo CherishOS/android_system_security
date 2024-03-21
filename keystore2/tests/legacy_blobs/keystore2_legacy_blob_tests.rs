@@ -25,12 +25,10 @@ use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor,
 };
 
-use android_security_maintenance::aidl::android::security::maintenance::{
-    IKeystoreMaintenance::IKeystoreMaintenance, UserState::UserState,
-};
+use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::IKeystoreMaintenance;
 
 use android_security_authorization::aidl::android::security::authorization::{
-    IKeystoreAuthorization::IKeystoreAuthorization, LockScreenEvent::LockScreenEvent,
+    IKeystoreAuthorization::IKeystoreAuthorization,
 };
 
 use keystore2::key_parameter::KeyParameter as KsKeyparameter;
@@ -85,7 +83,7 @@ fn keystore2_restart_service() {
         .expect("failed to execute pidof keystore2");
 
     let id = String::from_utf8(output.stdout).unwrap();
-    let id: String = id.chars().filter(|c| c.is_digit(10)).collect();
+    let id: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
 
     let _status = std::process::Command::new("kill").arg("-9").arg(id).status().unwrap();
 
@@ -164,13 +162,19 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                 .getSecurityLevel(SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT)
                 .unwrap();
             // Generate Key BLOB and prepare legacy keystore blob files.
-            let key_metadata =
-                key_generations::generate_ec_p256_signing_key_with_attestation(&sec_level)
-                    .expect("Failed to generate key blob");
+            let att_challenge: &[u8] = b"foo";
+            let key_metadata = key_generations::generate_ec_p256_signing_key(
+                &sec_level,
+                Domain::BLOB,
+                SELINUX_SHELL_NAMESPACE,
+                None,
+                Some(att_challenge),
+            )
+            .expect("Failed to generate key blob");
 
             // Create keystore file layout for user_99.
             let pw: Password = PASSWORD.into();
-            let pw_key = TestKey(pw.derive_key(Some(SUPERKEY_SALT), 32).unwrap());
+            let pw_key = TestKey(pw.derive_key(SUPERKEY_SALT, 32).unwrap());
             let super_key =
                 TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
 
@@ -225,8 +229,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
             keystore2_restart_service();
 
             let auth_service = get_authorization();
-            match auth_service.onLockScreenEvent(LockScreenEvent::UNLOCK, 99, Some(PASSWORD), None)
-            {
+            match auth_service.onDeviceUnlocked(99, Some(PASSWORD)) {
                 Ok(result) => {
                     println!("Unlock Result: {:?}", result);
                 }
@@ -234,9 +237,6 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                     panic!("Unlock should have succeeded: {:?}", e);
                 }
             }
-
-            let maint_service = get_maintenance();
-            assert_eq!(Ok(UserState(1)), maint_service.getState(99));
 
             let mut key_params: Vec<KsKeyparameter> = Vec::new();
             for param in key_metadata.authorizations {
@@ -415,13 +415,19 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                 .getSecurityLevel(SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT)
                 .unwrap();
             // Generate Key BLOB and prepare legacy keystore blob files.
-            let key_metadata =
-                key_generations::generate_ec_p256_signing_key_with_attestation(&sec_level)
-                    .expect("Failed to generate key blob");
+            let att_challenge: &[u8] = b"foo";
+            let key_metadata = key_generations::generate_ec_p256_signing_key(
+                &sec_level,
+                Domain::BLOB,
+                SELINUX_SHELL_NAMESPACE,
+                None,
+                Some(att_challenge),
+            )
+            .expect("Failed to generate key blob");
 
             // Create keystore file layout for user_98.
             let pw: Password = PASSWORD.into();
-            let pw_key = TestKey(pw.derive_key(Some(SUPERKEY_SALT), 32).unwrap());
+            let pw_key = TestKey(pw.derive_key(SUPERKEY_SALT, 32).unwrap());
             let super_key =
                 TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
 
@@ -480,8 +486,7 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
             keystore2_restart_service();
 
             let auth_service = get_authorization();
-            match auth_service.onLockScreenEvent(LockScreenEvent::UNLOCK, 98, Some(PASSWORD), None)
-            {
+            match auth_service.onDeviceUnlocked(98, Some(PASSWORD)) {
                 Ok(result) => {
                     println!("Unlock Result: {:?}", result);
                 }
@@ -489,9 +494,6 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                     panic!("Unlock should have succeeded: {:?}", e);
                 }
             }
-
-            let maint_service = get_maintenance();
-            assert_eq!(Ok(UserState(1)), maint_service.getState(98));
 
             let mut key_params: Vec<KsKeyparameter> = Vec::new();
             for param in key_metadata.authorizations {

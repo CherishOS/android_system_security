@@ -47,6 +47,7 @@ mod audit_log;
 mod gc;
 mod km_compat;
 mod super_key;
+mod sw_keyblob;
+mod watchdog_helper;
 
-#[cfg(feature = "watchdog")]
-mod watchdog;
+use message_macro::source_location_msg as ks_err;

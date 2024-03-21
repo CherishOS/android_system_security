@@ -126,7 +126,11 @@
 //! Either way, we have to revaluate the pruning scores.
 
 use crate::enforcements::AuthInfo;
-use crate::error::{map_err_with, map_km_error, map_or_log_err, Error, ErrorCode, ResponseCode};
+use crate::error::{
+    error_to_serialized_error, map_err_with, map_km_error, map_or_log_err, Error, ErrorCode,
+    ResponseCode, SerializedError,
+};
+use crate::ks_err;
 use crate::metrics_store::log_key_operation_event_stats;
 use crate::utils::watchdog as wd;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
@@ -161,7 +165,7 @@ pub enum Outcome {
     /// Operation is pruned.
     Pruned,
     /// Operation is failed with the error code.
-    ErrorCode(ErrorCode),
+    ErrorCode(SerializedError),
 }
 
 /// Operation bundles all of the operation related resources and tracks the operation's
@@ -304,8 +308,7 @@ impl Operation {
         err: Result<T, Error>,
     ) -> Result<T, Error> {
         match &err {
-            Err(Error::Km(e)) => *locked_outcome = Outcome::ErrorCode(*e),
-            Err(_) => *locked_outcome = Outcome::ErrorCode(ErrorCode::UNKNOWN_ERROR),
+            Err(e) => *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e)),
             Ok(_) => (),
         }
         err
@@ -320,10 +323,8 @@ impl Operation {
         let guard = self.outcome.lock().expect("In check_active.");
         match *guard {
             Outcome::Unknown => Ok(guard),
-            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)).context(format!(
-                "In check_active: Call on finalized operation with outcome: {:?}.",
-                *guard
-            )),
+            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE))
+                .context(ks_err!("Call on finalized operation with outcome: {:?}.", *guard)),
         }
     }
 
@@ -358,13 +359,13 @@ impl Operation {
             .lock()
             .unwrap()
             .before_update()
-            .context("In update_aad: Trying to get auth tokens.")?;
+            .context(ks_err!("Trying to get auth tokens."))?;
 
-        self.update_outcome(&mut *outcome, {
+        self.update_outcome(&mut outcome, {
             let _wp = wd::watch_millis("Operation::update_aad: calling updateAad", 500);
             map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
         })
-        .context("In update_aad: KeyMint::update failed.")?;
+        .context(ks_err!("Update failed."))?;
 
         Ok(())
     }
@@ -381,14 +382,14 @@ impl Operation {
             .lock()
             .unwrap()
             .before_update()
-            .context("In update: Trying to get auth tokens.")?;
+            .context(ks_err!("Trying to get auth tokens."))?;
 
         let output = self
-            .update_outcome(&mut *outcome, {
+            .update_outcome(&mut outcome, {
                 let _wp = wd::watch_millis("Operation::update: calling update", 500);
                 map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
             })
-            .context("In update: KeyMint::update failed.")?;
+            .context(ks_err!("Update failed."))?;
 
         if output.is_empty() {
             Ok(None)
@@ -411,10 +412,10 @@ impl Operation {
             .lock()
             .unwrap()
             .before_finish()
-            .context("In finish: Trying to get auth tokens.")?;
+            .context(ks_err!("Trying to get auth tokens."))?;
 
         let output = self
-            .update_outcome(&mut *outcome, {
+            .update_outcome(&mut outcome, {
                 let _wp = wd::watch_millis("Operation::finish: calling finish", 500);
                 map_km_error(self.km_op.finish(
                     input,
@@ -424,7 +425,7 @@ impl Operation {
                     confirmation_token.as_deref(),
                 ))
             })
-            .context("In finish: KeyMint::finish failed.")?;
+            .context(ks_err!("Finish failed."))?;
 
         self.auth_info.lock().unwrap().after_finish().context("In finish.")?;
 
@@ -447,7 +448,7 @@ impl Operation {
 
         {
             let _wp = wd::watch_millis("Operation::abort: calling abort", 500);
-            map_km_error(self.km_op.abort()).context("In abort: KeyMint::abort failed.")
+            map_km_error(self.km_op.abort()).context(ks_err!("KeyMint::abort failed."))
         }
     }
 }
@@ -790,7 +791,7 @@ impl KeystoreOperation {
             Ok(mut mutex_guard) => {
                 let result = match &*mutex_guard {
                     Some(op) => {
-                        let result = f(&*op);
+                        let result = f(op);
                         // Any error here means we can discard the operation.
                         if result.is_err() {
                             delete_op = true;
@@ -798,7 +799,7 @@ impl KeystoreOperation {
                         result
                     }
                     None => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE))
-                        .context("In KeystoreOperation::with_locked_operation"),
+                        .context(ks_err!("KeystoreOperation::with_locked_operation")),
                 };
 
                 if delete_op {
@@ -811,7 +812,7 @@ impl KeystoreOperation {
                 result
             }
             Err(_) => Err(Error::Rc(ResponseCode::OPERATION_BUSY))
-                .context("In KeystoreOperation::with_locked_operation"),
+                .context(ks_err!("KeystoreOperation::with_locked_operation")),
         }
     }
 }
@@ -823,7 +824,7 @@ impl IKeystoreOperation for KeystoreOperation {
         let _wp = wd::watch_millis("IKeystoreOperation::updateAad", 500);
         map_or_log_err(
             self.with_locked_operation(
-                |op| op.update_aad(aad_input).context("In KeystoreOperation::updateAad"),
+                |op| op.update_aad(aad_input).context(ks_err!("KeystoreOperation::updateAad")),
                 false,
             ),
             Ok,
@@ -834,7 +835,7 @@ impl IKeystoreOperation for KeystoreOperation {
         let _wp = wd::watch_millis("IKeystoreOperation::update", 500);
         map_or_log_err(
             self.with_locked_operation(
-                |op| op.update(input).context("In KeystoreOperation::update"),
+                |op| op.update(input).context(ks_err!("KeystoreOperation::update")),
                 false,
             ),
             Ok,
@@ -848,7 +849,7 @@ impl IKeystoreOperation for KeystoreOperation {
         let _wp = wd::watch_millis("IKeystoreOperation::finish", 500);
         map_or_log_err(
             self.with_locked_operation(
-                |op| op.finish(input, signature).context("In KeystoreOperation::finish"),
+                |op| op.finish(input, signature).context(ks_err!("KeystoreOperation::finish")),
                 true,
             ),
             Ok,
@@ -859,7 +860,7 @@ impl IKeystoreOperation for KeystoreOperation {
         let _wp = wd::watch_millis("IKeystoreOperation::abort", 500);
         map_err_with(
             self.with_locked_operation(
-                |op| op.abort(Outcome::Abort).context("In KeystoreOperation::abort"),
+                |op| op.abort(Outcome::Abort).context(ks_err!("KeystoreOperation::abort")),
                 true,
             ),
             |e| {

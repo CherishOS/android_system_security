@@ -21,6 +21,7 @@ extern "C" {
 
 #[allow(missing_docs)] // TODO remove this
 pub fn add_keymint_device_service() -> i32 {
+    // SAFETY: This is always safe to call.
     unsafe { addKeyMintDeviceService() }
 }
 
@@ -447,6 +448,10 @@ mod tests {
         assert!(sec_level_enforced.iter().any(|kp| matches!(
             kp,
             KeyParameter { tag: Tag::OS_PATCHLEVEL, value: KeyParameterValue::Integer(_) }
+        )));
+        assert!(sec_level_enforced.iter().any(|kp| matches!(
+            kp,
+            KeyParameter { tag: Tag::VENDOR_PATCHLEVEL, value: KeyParameterValue::Integer(_) }
         )));
         assert!(sec_level_enforced.iter().any(|kp| matches!(
             kp,

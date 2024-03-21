@@ -19,6 +19,8 @@
 //! defined by keystore2 and keystore2_key respectively.
 
 use crate::error::Error as KsError;
+use crate::error::ResponseCode;
+use crate::ks_err;
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
 };
@@ -53,7 +55,7 @@ implement_class!(
     /// the SELinux permissions.
     #[repr(i32)]
     #[selinux(class_name = keystore2_key)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum KeyPerm {
         /// Checked when convert_storage_key_to_ephemeral is called.
         #[selinux(name = convert_storage_key_to_ephemeral)]
@@ -87,7 +89,9 @@ implement_class!(
         /// Checked when the caller attempts to use a private or public key.
         #[selinux(name = use)]
         Use = KeyPermission::USE.0,
-        /// Checked when the caller attempts to use device ids for attestation.
+        /// Does nothing, and is not checked. For use of device identifiers,
+        /// the caller must hold the READ_PRIVILEGED_PHONE_STATE Android
+        /// permission.
         #[selinux(name = use_dev_id)]
         UseDevId = KeyPermission::USE_DEV_ID.0,
     }
@@ -97,7 +101,7 @@ implement_class!(
     /// KeystorePerm provides a convenient abstraction from the SELinux class `keystore2`.
     /// Using the implement_permission macro we get the same features as `KeyPerm`.
     #[selinux(class_name = keystore2)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum KeystorePerm {
         /// Checked when a new auth token is installed.
         #[selinux(name = add_auth)]
@@ -105,9 +109,6 @@ implement_class!(
         /// Checked when an app is uninstalled or wiped.
         #[selinux(name = clear_ns)]
         ClearNs,
-        /// Checked when the user state is queried from Keystore 2.0.
-        #[selinux(name = get_state)]
-        GetState,
         /// Checked when Keystore 2.0 is asked to list a namespace that the caller
         /// does not have the get_info permission for.
         #[selinux(name = list)]
@@ -148,6 +149,9 @@ implement_class!(
         /// Checked on calls to IRemotelyProvisionedKeyPool::getAttestationKey
         #[selinux(name = get_attestation_key)]
         GetAttestationKey,
+        /// Checked on IKeystoreAuthorization::getLastAuthTime() is called.
+        #[selinux(name = get_last_auth_time)]
+        GetLastAuthTime,
     }
 );
 
@@ -299,8 +303,8 @@ pub fn check_grant_permission(
     }
 
     for p in access_vec.into_iter() {
-        selinux::check_permission(caller_ctx, &target_context, p).context(format!(
-            "check_grant_permission: check_permission failed. \
+        selinux::check_permission(caller_ctx, &target_context, p).context(ks_err!(
+            "check_permission failed. \
             The caller may have tried to grant a permission that they don't possess. {:?}",
             p
         ))?
@@ -354,10 +358,10 @@ pub fn check_key_permission(
                 return Err(selinux::Error::perm())
                     .context("Trying to access key without ownership.");
             }
-            getcon().context("check_key_permission: getcon failed.")?
+            getcon().context(ks_err!("getcon failed."))?
         }
         Domain::SELINUX => lookup_keystore2_key_context(key.nspace)
-            .context("check_key_permission: Domain::SELINUX: Failed to lookup namespace.")?,
+            .context(ks_err!("Domain::SELINUX: Failed to lookup namespace."))?,
         Domain::GRANT => {
             match access_vector {
                 Some(_) => {
@@ -366,9 +370,9 @@ pub fn check_key_permission(
                 }
                 None => {
                     // If DOMAIN_GRANT was selected an access vector must be supplied.
-                    return Err(KsError::sys()).context(
+                    return Err(KsError::sys()).context(ks_err!(
                         "Cannot check permission for Domain::GRANT without access vector.",
-                    );
+                    ));
                 }
             }
         }
@@ -376,11 +380,12 @@ pub fn check_key_permission(
             // We should never be called with `Domain::KEY_ID. The database
             // lookup should have converted this into one of `Domain::APP`
             // or `Domain::SELINUX`.
-            return Err(KsError::sys()).context("Cannot check permission for Domain::KEY_ID.");
+            return Err(KsError::sys())
+                .context(ks_err!("Cannot check permission for Domain::KEY_ID.",));
         }
         Domain::BLOB => {
             let tctx = lookup_keystore2_key_context(key.nspace)
-                .context("Domain::BLOB: Failed to lookup namespace.")?;
+                .context(ks_err!("Domain::BLOB: Failed to lookup namespace."))?;
             // If DOMAIN_KEY_BLOB was specified, we check for the "manage_blob"
             // permission in addition to the requested permission.
             selinux::check_permission(caller_ctx, &tctx, KeyPerm::ManageBlob)?;
@@ -388,7 +393,7 @@ pub fn check_key_permission(
             tctx
         }
         _ => {
-            return Err(KsError::sys())
+            return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
                 .context(format!("Unknown domain value: \"{:?}\".", key.domain))
         }
     };
@@ -495,7 +500,6 @@ mod tests {
         let system_server_ctx = Context::new("u:r:system_server:s0")?;
         assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::AddAuth).is_ok());
         assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::ClearNs).is_ok());
-        assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::GetState).is_ok());
         assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::Lock).is_ok());
         assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::Reset).is_ok());
         assert!(check_keystore_permission(&system_server_ctx, KeystorePerm::Unlock).is_ok());
@@ -505,7 +509,6 @@ mod tests {
         let shell_ctx = Context::new("u:r:shell:s0")?;
         assert_perm_failed!(check_keystore_permission(&shell_ctx, KeystorePerm::AddAuth));
         assert_perm_failed!(check_keystore_permission(&shell_ctx, KeystorePerm::ClearNs));
-        assert!(check_keystore_permission(&shell_ctx, KeystorePerm::GetState).is_ok());
         assert_perm_failed!(check_keystore_permission(&shell_ctx, KeystorePerm::List));
         assert_perm_failed!(check_keystore_permission(&shell_ctx, KeystorePerm::Lock));
         assert_perm_failed!(check_keystore_permission(&shell_ctx, KeystorePerm::Reset));

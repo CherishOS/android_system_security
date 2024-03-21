@@ -30,17 +30,18 @@ use std::{
 };
 
 use anyhow::{ensure, Context, Result};
+use clap::Parser;
 use log::{error, info, Level};
 use nix::sys::signal;
 use tokio::{io::AsyncWriteExt, net::UnixListener as TokioUnixListener};
 
 use crate::conditioner::ConditionerBuilder;
 
-//#[derive(Debug, clap::Parser)]
+#[derive(Debug, Parser)]
 struct Cli {
-    //#[clap(long, default_value = "/dev/hw_random")]
+    #[clap(long, default_value = "/dev/hw_random")]
     source: PathBuf,
-    //#[clap(long)]
+    #[clap(long)]
     socket: Option<PathBuf>,
 }
 
@@ -68,7 +69,8 @@ fn get_socket(path: &Path) -> Result<UnixListener> {
 
 fn setup() -> Result<(ConditionerBuilder, UnixListener)> {
     configure_logging()?;
-    let cli = Cli { source: PathBuf::from("/dev/hw_random"), socket: None };
+    let cli = Cli::try_parse()?;
+    // SAFETY: Nothing else sets the signal handler, so either it was set here or it is the default.
     unsafe { signal::signal(signal::Signal::SIGPIPE, signal::SigHandler::SigIgn) }
         .context("In setup, setting SIGPIPE to SIG_IGN")?;
 
@@ -133,4 +135,15 @@ fn main() {
     // Logs are sometimes mysteriously not being logged, so print too
     println!("prng_seeder: launch terminated: {:?}", e);
     std::process::exit(-1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn verify_cli() {
+        Cli::command().debug_assert();
+    }
 }

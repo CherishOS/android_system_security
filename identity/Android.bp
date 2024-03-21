@@ -19,49 +19,61 @@ cc_defaults {
     sanitize: {
         misc_undefined : ["integer"],
     },
-    clang : true,
+
+}
+
+cc_defaults {
+    name: "credstore_defaults",
+    defaults: [
+        "identity_defaults",
+        "identity_use_latest_hal_aidl_cpp_static",
+        "keymint_use_latest_hal_aidl_ndk_shared",
+        "keymint_use_latest_hal_aidl_cpp_static",
+        "android.hardware.identity-support-lib-deps",
+    ],
+    srcs: [
+        "Credential.cpp",
+        "CredentialData.cpp",
+        "CredentialStore.cpp",
+        "CredentialStoreFactory.cpp",
+        "Session.cpp",
+        "Util.cpp",
+        "WritableCredential.cpp",
+    ],
+    shared_libs: [
+        "android.hardware.keymaster@4.0",
+        "android.security.authorization-ndk",
+        "libbase",
+        "libbinder",
+        "libbinder_ndk",
+        "libcrypto",
+        "libhidlbase",
+        "liblog",
+        "libutils",
+        "libutilscallstack",
+        "libkeystore-attestation-application-id",
+    ],
+    static_libs: [
+        "android.hardware.keymaster-V3-cpp",
+        "android.hardware.identity-support-lib",
+        "android.hardware.security.rkp-V3-cpp",
+        "android.security.rkp_aidl-cpp",
+        "libcppbor_external",
+        "libcredstore_aidl",
+        "libkeymaster4support",
+        "librkp_support",
+    ],
 }
 
 cc_binary {
     name: "credstore",
     defaults: [
-        "identity_defaults",
-        "keymint_use_latest_hal_aidl_ndk_shared",
-        "keymint_use_latest_hal_aidl_cpp_static",
+        "credstore_defaults",
     ],
-
     srcs: [
         "main.cpp",
-        "CredentialStore.cpp",
-        "CredentialStoreFactory.cpp",
-        "WritableCredential.cpp",
-        "Credential.cpp",
-        "CredentialData.cpp",
-        "Session.cpp",
-        "Util.cpp",
     ],
     init_rc: ["credstore.rc"],
-    shared_libs: [
-        "libbase",
-        "libbinder",
-        "libbinder_ndk",
-        "android.hardware.keymaster@4.0",
-        "libcredstore_aidl",
-        "libcrypto",
-        "libutils",
-        "libhidlbase",
-        "android.hardware.identity-support-lib",
-        "libkeymaster4support",
-        "libkeystore-attestation-application-id",
-        "android.security.authorization-ndk",
-        "android.security.remoteprovisioning-cpp",
-        "libutilscallstack",
-    ],
-    static_libs: [
-        "android.hardware.identity-V4-cpp",
-        "android.hardware.keymaster-V3-cpp",
-        "libcppbor_external",
-    ],
 }
 
 filegroup {
@@ -86,7 +98,7 @@ filegroup {
     path: "binder",
 }
 
-cc_library_shared {
+cc_library_static {
     name: "libcredstore_aidl",
     srcs: [
         ":credstore_aidl",
@@ -100,9 +112,30 @@ cc_library_shared {
     shared_libs: [
         "libbinder",
         "libutils",
+    ],
+    static_libs: [
         "libkeymaster4support",
     ],
     export_shared_lib_headers: [
         "libbinder",
     ],
+}
+
+cc_fuzz {
+    name: "credstore_service_fuzzer",
+    defaults: [
+        "credstore_defaults",
+        "service_fuzzer_defaults",
+        "fuzzer_disable_leaks",
+    ],
+    srcs: [
+        "fuzzers/credstore_service_fuzzer.cpp",
+    ],
+    fuzz_config: {
+        triage_assignee: "waghpawan@google.com",
+        cc: [
+            "trong@google.com",
+            "zeuthen@google.com",
+        ]
+    },
 }

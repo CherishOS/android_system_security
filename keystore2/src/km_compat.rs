@@ -15,6 +15,7 @@
 //! Provide a wrapper around a KeyMint device that allows up-level features to
 //! be emulated on back-level devices.
 
+use crate::ks_err;
 use crate::error::{map_binder_status, map_binder_status_code, map_or_log_err, Error, ErrorCode};
 use android_hardware_security_keymint::binder::{BinderFeatures, StatusCode, Strong};
 use android_hardware_security_secureclock::aidl::android::hardware::security::secureclock::TimeStampToken::TimeStampToken;
@@ -30,6 +31,16 @@ use android_hardware_security_keymint::aidl::android::hardware::security::keymin
 use android_security_compat::aidl::android::security::compat::IKeystoreCompatService::IKeystoreCompatService;
 use anyhow::Context;
 use keystore2_crypto::{hmac_sha256, HMAC_SHA256_LEN};
+
+/// Magic prefix used by the km_compat C++ code to mark a key that is owned by an
+/// underlying Keymaster hardware device that has been wrapped by km_compat. (The
+/// final zero byte indicates that the blob is not software emulated.)
+pub const KEYMASTER_BLOB_HW_PREFIX: &[u8] = b"pKMblob\x00";
+
+/// Magic prefix used by the km_compat C++ code to mark a key that is owned by an
+/// software emulation device that has been wrapped by km_compat. (The final one
+/// byte indicates that the blob is software emulated.)
+pub const KEYMASTER_BLOB_SW_PREFIX: &[u8] = b"pKMblob\x01";
 
 /// Key data associated with key generation/import.
 #[derive(Debug, PartialEq, Eq)]
@@ -81,14 +92,14 @@ fn wrap_keyblob(keyblob: &[u8]) -> anyhow::Result<Vec<u8>> {
     result.extend_from_slice(KEYBLOB_PREFIX);
     result.extend_from_slice(keyblob);
     let tag = hmac_sha256(KEYBLOB_HMAC_KEY, keyblob)
-        .context("In wrap_keyblob, failed to calculate HMAC-SHA256")?;
+        .context(ks_err!("failed to calculate HMAC-SHA256"))?;
     result.extend_from_slice(&tag);
     Ok(result)
 }
 
 /// Return an unwrapped version of the provided `keyblob`, which may or may
 /// not be associated with the software emulation.
-fn unwrap_keyblob(keyblob: &[u8]) -> KeyBlob {
+pub fn unwrap_keyblob(keyblob: &[u8]) -> KeyBlob {
     if !keyblob.starts_with(KEYBLOB_PREFIX) {
         return KeyBlob::Raw(keyblob);
     }
@@ -138,10 +149,9 @@ where
         // This is a no-op if it was called before.
         keystore2_km_compat::add_keymint_device_service();
 
-        let keystore_compat_service: Strong<dyn IKeystoreCompatService> = map_binder_status_code(
-            binder::get_interface("android.security.compat"),
-        )
-        .context("In BacklevelKeyMintWrapper::wrap: Trying to connect to compat service.")?;
+        let keystore_compat_service: Strong<dyn IKeystoreCompatService> =
+            map_binder_status_code(binder::get_interface("android.security.compat"))
+                .context(ks_err!("Trying to connect to compat service."))?;
         let soft =
             map_binder_status(keystore_compat_service.getKeyMintDevice(SecurityLevel::SOFTWARE))
                 .map_err(|e| match e {
@@ -150,7 +160,7 @@ where
                     }
                     e => e,
                 })
-                .context("In BacklevelKeyMintWrapper::wrap: Trying to get software device.")?;
+                .context(ks_err!("Trying to get software device."))?;
 
         Ok(BnKeyMintDevice::new_binder(
             Self { real, soft, emu },
@@ -159,7 +169,7 @@ where
     }
 }
 
-impl<T> binder::Interface for BacklevelKeyMintWrapper<T> where T: EmulationDetector {}
+impl<T> binder::Interface for BacklevelKeyMintWrapper<T> where T: EmulationDetector + 'static {}
 
 impl<T> IKeyMintDevice for BacklevelKeyMintWrapper<T>
 where
@@ -194,6 +204,15 @@ where
         // to the result from the real device.
         let _ = self.soft.earlyBootEnded();
         self.real.earlyBootEnded()
+    }
+    fn getRootOfTrustChallenge(&self) -> binder::Result<[u8; 16]> {
+        self.real.getRootOfTrustChallenge()
+    }
+    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> binder::Result<Vec<u8>> {
+        self.real.getRootOfTrust(challenge)
+    }
+    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> binder::Result<()> {
+        self.real.sendRootOfTrust(root_of_trust)
     }
 
     // For methods that emit keyblobs, check whether the underlying real device
@@ -298,15 +317,6 @@ where
             KeyBlob::Raw(keyblob) => self.real.getKeyCharacteristics(keyblob, app_id, app_data),
             KeyBlob::Wrapped(keyblob) => self.soft.getKeyCharacteristics(keyblob, app_id, app_data),
         }
-    }
-    fn getRootOfTrustChallenge(&self) -> binder::Result<[u8; 16]> {
-        self.real.getRootOfTrustChallenge()
-    }
-    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> binder::Result<Vec<u8>> {
-        self.real.getRootOfTrust(challenge)
-    }
-    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> binder::Result<()> {
-        self.real.sendRootOfTrust(root_of_trust)
     }
     fn convertStorageKeyToEphemeral(&self, storage_keyblob: &[u8]) -> binder::Result<Vec<u8>> {
         // Storage keys should never be associated with a software emulated device.
